@@ -1,0 +1,25 @@
+{
+  "name": "pebble-air",
+  "author": "yrami",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Pebble Air",
+    "uuid": "6f0b1f3e-8c2a-4d57-9a41-2e7c5d9b1a36",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["emery"],
+    "watchapp": {
+      "watchface": false
+    },
+    "usesPermissions": [
+      { "name": "Internet", "parameters": { "domains": ["api.airgradient.com"] } }
+    ],
+    "messageKeys": ["Aqi", "MeasuredAt", "ErrorCode", "RequestRefresh"],
+    "resources": {
+      "media": []
+    }
+  }
+}
