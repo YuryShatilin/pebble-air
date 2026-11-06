@@ -1,11 +1,17 @@
 // Watch side: renders the AQI supplied by the phone. Select refreshes.
 // The last reading is kept with its measurement time, so old data always shows its age.
+//
+// PebbleKit JS only runs while the app is in the foreground, so a background refresh is the
+// app waking itself up, fetching, saving and returning to the watchface.
 #include <pebble.h>
 
 #define PERSIST_KEY_LEGACY_READING 1
 #define PERSIST_KEY_READING 2
+#define PERSIST_KEY_WAKEUP_ID 3
 #define RESPONSE_TIMEOUT_MS 30000
-#define REFRESH_INTERVAL_MINUTES 15
+#define BACKGROUND_REFRESH_INTERVAL_SECONDS (30 * 60)
+#define WAKEUP_RETRY_STEP_SECONDS (2 * 60)
+#define WAKEUP_SCHEDULE_ATTEMPTS 5
 
 enum {
   ERROR_NONE = 0,
@@ -37,8 +43,10 @@ static AppTimer *s_response_timer;
 static Reading s_reading;
 static bool s_has_reading;
 static bool s_refreshing;
+static bool s_js_ready;
+static bool s_send_pending;
+static bool s_background_run;
 static int s_error = ERROR_NONE;
-static int s_minutes_since_refresh;
 
 static char s_value_text[16];
 static char s_status_text[48];
@@ -81,6 +89,9 @@ static void render_status(void) {
     format_age(age, sizeof(age));
   }
   const char *first_line = s_refreshing ? "Updating..." : error_text(s_error);
+  if (first_line[0] == '\0' && !s_has_reading) {
+    first_line = "Press Select";
+  }
   const char *separator = (first_line[0] != '\0' && age[0] != '\0') ? "\n" : "";
   snprintf(s_status_text, sizeof(s_status_text), "%s%s%s", first_line, separator, age);
   text_layer_set_text(s_status_layer, s_status_text);
@@ -118,14 +129,26 @@ static void render(void) {
   render_status();
 }
 
+static void return_to_watchface(void) {
+  s_background_run = false;
+  exit_reason_set(APP_EXIT_ACTION_PERFORMED_SUCCESSFULLY);
+  window_stack_pop_all(false);
+}
+
 static void finish_refresh(int error) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Refresh finished, error: %d, aqi: %d, measured at: %d",
+          error, (int)s_reading.aqi, (int)s_reading.measured_at);
   s_refreshing = false;
+  s_send_pending = false;
   s_error = error;
   if (s_response_timer != NULL) {
     app_timer_cancel(s_response_timer);
     s_response_timer = NULL;
   }
   render();
+  if (s_background_run) {
+    return_to_watchface();
+  }
 }
 
 static void response_timeout(void *context) {
@@ -135,7 +158,6 @@ static void response_timeout(void *context) {
 
 static void start_waiting(void) {
   s_refreshing = true;
-  s_minutes_since_refresh = 0;
   if (s_response_timer != NULL) {
     app_timer_cancel(s_response_timer);
   }
@@ -143,11 +165,8 @@ static void start_waiting(void) {
   render();
 }
 
-static void request_refresh(void) {
-  if (s_refreshing) {
-    return;
-  }
-  start_waiting();
+static void send_refresh_request(void) {
+  s_send_pending = false;
 
   DictionaryIterator *out;
   AppMessageResult result = app_message_outbox_begin(&out);
@@ -162,7 +181,27 @@ static void request_refresh(void) {
   }
 }
 
+static void request_refresh(void) {
+  if (s_refreshing) {
+    return;
+  }
+  start_waiting();
+  if (s_js_ready) {
+    send_refresh_request();
+  } else {
+    s_send_pending = true;
+  }
+}
+
 static void inbox_received(DictionaryIterator *iterator, void *context) {
+  if (dict_find(iterator, MESSAGE_KEY_JsReady) != NULL) {
+    s_js_ready = true;
+    if (s_send_pending) {
+      send_refresh_request();
+    }
+    return;
+  }
+
   Tuple *error = dict_find(iterator, MESSAGE_KEY_ErrorCode);
   if (error != NULL) {
     finish_refresh((int)error->value->int32);
@@ -193,6 +232,8 @@ static void outbox_failed(DictionaryIterator *iterator, AppMessageResult reason,
 }
 
 static void select_click(ClickRecognizerRef recognizer, void *context) {
+  // Pressing a button during a background run means the user wants the app to stay open.
+  s_background_run = false;
   request_refresh();
 }
 
@@ -206,12 +247,39 @@ static void click_config(void *context) {
 }
 
 static void tick(struct tm *tick_time, TimeUnits units_changed) {
-  s_minutes_since_refresh++;
-  if (s_minutes_since_refresh >= REFRESH_INTERVAL_MINUTES) {
-    request_refresh();
-  } else {
-    render_status();
+  render_status();
+}
+
+// Only schedules when nothing is pending: rescheduling on every launch would keep pushing the
+// wakeup back for anyone opening the app more often than the interval.
+static void ensure_wakeup_scheduled(void) {
+  time_t scheduled_at;
+  if (persist_exists(PERSIST_KEY_WAKEUP_ID) &&
+      wakeup_query(persist_read_int(PERSIST_KEY_WAKEUP_ID), &scheduled_at)) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "Wakeup pending at %d", (int)scheduled_at);
+    return;
   }
+
+  time_t when = time(NULL) + BACKGROUND_REFRESH_INTERVAL_SECONDS;
+  for (int attempt = 0; attempt < WAKEUP_SCHEDULE_ATTEMPTS; attempt++) {
+    WakeupId id = wakeup_schedule(when, 0, false);
+    if (id >= 0) {
+      persist_write_int(PERSIST_KEY_WAKEUP_ID, id);
+      APP_LOG(APP_LOG_LEVEL_INFO, "Wakeup scheduled at %d", (int)when);
+      return;
+    }
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Could not schedule wakeup: %d", (int)id);
+    if (id != E_RANGE) {
+      return;
+    }
+    // E_RANGE: the slot is too close to a wakeup of another app.
+    when += WAKEUP_RETRY_STEP_SECONDS;
+  }
+}
+
+static void wakeup_fired(WakeupId id, int32_t cookie) {
+  ensure_wakeup_scheduled();
+  request_refresh();
 }
 
 static TextLayer *add_text_layer(Layer *root, GRect frame, const char *font_key) {
@@ -260,11 +328,21 @@ static void init(void) {
   app_message_register_outbox_failed(outbox_failed);
   app_message_open(128, 64);
 
-  window_stack_push(s_window, true);
+  s_background_run = launch_reason() == APP_LAUNCH_WAKEUP;
+  APP_LOG(APP_LOG_LEVEL_INFO, "Started, background run: %d", (int)s_background_run);
+  window_stack_push(s_window, !s_background_run);
   tick_timer_service_subscribe(MINUTE_UNIT, tick);
 
-  // The phone fetches by itself on its 'ready' event, so here we only wait for the answer.
-  start_waiting();
+  wakeup_service_subscribe(wakeup_fired);
+  ensure_wakeup_scheduled();
+
+  if (s_background_run) {
+    if (connection_service_peek_pebble_app_connection()) {
+      request_refresh();
+    } else {
+      return_to_watchface();
+    }
+  }
 }
 
 static void deinit(void) {

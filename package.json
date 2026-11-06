@@ -17,7 +17,7 @@
     "usesPermissions": [
       { "name": "Internet", "parameters": { "domains": ["api.airgradient.com"] } }
     ],
-    "messageKeys": ["Aqi", "MeasuredAt", "ErrorCode", "RequestRefresh"],
+    "messageKeys": ["Aqi", "MeasuredAt", "ErrorCode", "RequestRefresh", "JsReady"],
     "resources": {
       "media": []
     }

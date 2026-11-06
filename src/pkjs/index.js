@@ -49,7 +49,10 @@ function fetchReading() {
   request.send();
 }
 
-Pebble.addEventListener('ready', fetchReading);
+// The watch decides when to fetch; it can only ask once this side is running.
+Pebble.addEventListener('ready', function () {
+  send({ JsReady: 1 });
+});
 
 Pebble.addEventListener('appmessage', function (e) {
   if (e.payload.RequestRefresh !== undefined) {
