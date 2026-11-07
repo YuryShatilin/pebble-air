@@ -8,6 +8,7 @@
 #define PERSIST_KEY_LEGACY_READING 1
 #define PERSIST_KEY_READING 2
 #define PERSIST_KEY_WAKEUP_ID 3
+#define PERSIST_KEY_STATION_LABEL 4
 #define RESPONSE_TIMEOUT_MS 30000
 #define BACKGROUND_REFRESH_INTERVAL_SECONDS (30 * 60)
 #define WAKEUP_RETRY_STEP_SECONDS (2 * 60)
@@ -50,6 +51,8 @@ static int s_error = ERROR_NONE;
 
 static char s_value_text[16];
 static char s_status_text[48];
+// Empty when the reading comes from the home station.
+static char s_station_label[32];
 
 static Category category_for(int32_t aqi) {
   if (aqi <= 50) return (Category){"Good", GColorGreen, GColorBlack};
@@ -98,6 +101,8 @@ static void render_status(void) {
 }
 
 static void render(void) {
+  text_layer_set_text(s_title_layer, s_station_label[0] != '\0' ? s_station_label : "Air Quality");
+
   if (!s_has_reading) {
     window_set_background_color(s_window, GColorWhite);
     text_layer_set_text_color(s_title_layer, GColorBlack);
@@ -218,6 +223,17 @@ static void inbox_received(DictionaryIterator *iterator, void *context) {
   s_reading = (Reading){aqi->value->int32, measured_at->value->int32};
   s_has_reading = true;
   persist_write_data(PERSIST_KEY_READING, &s_reading, sizeof(s_reading));
+
+  Tuple *label = dict_find(iterator, MESSAGE_KEY_StationLabel);
+  if (label != NULL) {
+    strncpy(s_station_label, label->value->cstring, sizeof(s_station_label) - 1);
+    s_station_label[sizeof(s_station_label) - 1] = '\0';
+    persist_write_string(PERSIST_KEY_STATION_LABEL, s_station_label);
+  } else {
+    s_station_label[0] = '\0';
+    persist_delete(PERSIST_KEY_STATION_LABEL);
+  }
+
   finish_refresh(ERROR_NONE);
 }
 
@@ -300,7 +316,6 @@ static void window_load(Window *window) {
   s_unit_layer = add_text_layer(root, GRect(0, 118, width, 24), FONT_KEY_GOTHIC_18);
   s_category_layer = add_text_layer(root, GRect(0, 142, width, 30), FONT_KEY_GOTHIC_24_BOLD);
   s_status_layer = add_text_layer(root, GRect(0, 178, width, 46), FONT_KEY_GOTHIC_18);
-  text_layer_set_text(s_title_layer, "Air Quality");
   render();
 }
 
@@ -317,6 +332,9 @@ static void init(void) {
   if (persist_exists(PERSIST_KEY_READING) &&
       persist_read_data(PERSIST_KEY_READING, &s_reading, sizeof(s_reading)) == (int)sizeof(s_reading)) {
     s_has_reading = true;
+  }
+  if (persist_exists(PERSIST_KEY_STATION_LABEL)) {
+    persist_read_string(PERSIST_KEY_STATION_LABEL, s_station_label, sizeof(s_station_label));
   }
 
   s_window = window_create();

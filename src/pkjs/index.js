@@ -1,8 +1,9 @@
-// Phone side: fetches the station reading and passes the computed AQI to the watch.
+// Phone side: fetches the station readings and passes the AQI to show to the watch.
 var aqi = require('./aqi');
 var station = require('./station');
 
-var STATION_URL = 'https://api.airgradient.com/public/api/v1/world/locations/' + station.locationId + '/measures/current';
+var STATION_URL_PREFIX = 'https://api.airgradient.com/public/api/v1/world/locations/';
+var STATION_URL_SUFFIX = '/measures/current';
 var REQUEST_TIMEOUT_MS = 15000;
 var ERROR_NETWORK = 1;
 
@@ -12,41 +13,79 @@ function send(message) {
   });
 }
 
-function sendError(code, reason) {
-  console.log('Reading failed: ' + reason);
-  send({ ErrorCode: code });
+function failure(code, reason) {
+  return { failed: true, code: code, reason: reason };
 }
 
-function handleResponse(text) {
+function parseResponse(text) {
   try {
-    send(aqi.parseReading(text));
+    return { failed: false, reading: aqi.parseReading(text) };
   } catch (e) {
     if (e instanceof aqi.DataError) {
-      sendError(e.code, e.message);
-    } else {
-      sendError(aqi.ERROR_BAD_DATA, String(e));
+      return failure(e.code, e.message);
     }
+    return failure(aqi.ERROR_BAD_DATA, String(e));
   }
 }
 
-function fetchReading() {
+function fetchStation(locationId, onResult) {
   var request = new XMLHttpRequest();
   request.timeout = REQUEST_TIMEOUT_MS;
   request.onload = function () {
     if (request.status === 200) {
-      handleResponse(request.responseText);
+      onResult(parseResponse(request.responseText));
     } else {
-      sendError(ERROR_NETWORK, 'HTTP ' + request.status);
+      onResult(failure(ERROR_NETWORK, 'HTTP ' + request.status));
     }
   };
   request.onerror = function () {
-    sendError(ERROR_NETWORK, 'Request error');
+    onResult(failure(ERROR_NETWORK, 'Request error'));
   };
   request.ontimeout = function () {
-    sendError(ERROR_NETWORK, 'Request timeout');
+    onResult(failure(ERROR_NETWORK, 'Request timeout'));
   };
-  request.open('GET', STATION_URL);
+  request.open('GET', STATION_URL_PREFIX + locationId + STATION_URL_SUFFIX);
   request.send();
+}
+
+function deliver(home, fallback, comparison) {
+  if (home.failed) {
+    console.log('Reading failed: ' + home.reason);
+    send({ ErrorCode: home.code });
+    return;
+  }
+  if (fallback.failed || comparison.failed) {
+    // Without both references the home station cannot be judged, so it stays on screen.
+    console.log('Comparison unavailable: ' + (fallback.reason || comparison.reason));
+    send(home.reading);
+    return;
+  }
+  if (aqi.isOutlier(home.reading.Aqi, [fallback.reading.Aqi, comparison.reading.Aqi])) {
+    console.log('Home AQI ' + home.reading.Aqi + ' is an outlier against ' +
+      fallback.reading.Aqi + ' and ' + comparison.reading.Aqi);
+    send({
+      Aqi: fallback.reading.Aqi,
+      MeasuredAt: fallback.reading.MeasuredAt,
+      StationLabel: station.fallback.label
+    });
+    return;
+  }
+  send(home.reading);
+}
+
+function refresh() {
+  var results = {};
+  var names = ['home', 'fallback', 'comparison'];
+  var remaining = names.length;
+  names.forEach(function (name) {
+    fetchStation(station[name].locationId, function (result) {
+      results[name] = result;
+      remaining--;
+      if (remaining === 0) {
+        deliver(results.home, results.fallback, results.comparison);
+      }
+    });
+  });
 }
 
 // The watch decides when to fetch; it can only ask once this side is running.
@@ -56,6 +95,6 @@ Pebble.addEventListener('ready', function () {
 
 Pebble.addEventListener('appmessage', function (e) {
   if (e.payload.RequestRefresh !== undefined) {
-    fetchReading();
+    refresh();
   }
 });

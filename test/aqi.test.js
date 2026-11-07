@@ -1,7 +1,7 @@
 // Run with: node --test test/aqi.test.js
 const test = require('node:test');
 const assert = require('node:assert');
-const { usAqi, correctedPm, parseReading, ERROR_STATION_OFFLINE, ERROR_BAD_DATA } = require('../src/pkjs/aqi.js');
+const { usAqi, correctedPm, parseReading, isOutlier, ERROR_STATION_OFFLINE, ERROR_BAD_DATA } = require('../src/pkjs/aqi.js');
 
 const TIMESTAMP = '2026-11-05T07:08:52.000Z';
 const TIMESTAMP_SECONDS = 1793862532;
@@ -76,6 +76,25 @@ test('correctedPm rejects invalid input', () => {
   for (const [pm, humidity] of [[null, 42], [-1, 42], [26.9, null], [26.9, undefined], [26.9, -1], [26.9, 101], [26.9, '42']]) {
     assert.throws(() => correctedPm(pm, humidity), (e) => e.code === ERROR_BAD_DATA, `${pm}, ${humidity}`);
   }
+});
+
+test('isOutlier is true only when the value is far from every reference', () => {
+  assert.strictEqual(isOutlier(40, [110, 120]), true, 'far below both');
+  assert.strictEqual(isOutlier(200, [100, 110]), true, 'far above both');
+  assert.strictEqual(isOutlier(40, [110, 45]), false, 'close to one reference');
+  assert.strictEqual(isOutlier(100, [100, 100]), false, 'equal');
+});
+
+test('isOutlier measures the deviation relative to the reference, and exactly 40% is not enough', () => {
+  assert.strictEqual(isOutlier(60, [100, 100]), false, 'exactly 40% below');
+  assert.strictEqual(isOutlier(59, [100, 100]), true, 'just over 40% below');
+  assert.strictEqual(isOutlier(140, [100, 100]), false, 'exactly 40% above');
+  assert.strictEqual(isOutlier(141, [100, 100]), true, 'just over 40% above');
+});
+
+test('isOutlier handles a clean reading of zero', () => {
+  assert.strictEqual(isOutlier(0, [0, 0]), false);
+  assert.strictEqual(isOutlier(5, [0, 0]), true);
 });
 
 test('parseReading sends the corrected AQI, matching IQAir for the observed sample', () => {

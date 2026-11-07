@@ -9,6 +9,7 @@ var BREAKPOINTS = [
 ];
 var MAX_AQI = 500;
 var MAX_PM = 325.4;
+var MAX_DEVIATION = 0.4;
 
 var ERROR_STATION_OFFLINE = 2;
 var ERROR_BAD_DATA = 3;
@@ -89,10 +90,19 @@ function parseReading(text) {
   };
 }
 
+// True when the value is off by more than the allowed share from every reference value,
+// each measured relative to that reference.
+function isOutlier(aqi, references) {
+  return references.every(function (reference) {
+    return Math.abs(aqi - reference) > reference * MAX_DEVIATION;
+  });
+}
+
 module.exports = {
   usAqi: usAqi,
   correctedPm: correctedPm,
   parseReading: parseReading,
+  isOutlier: isOutlier,
   DataError: DataError,
   ERROR_STATION_OFFLINE: ERROR_STATION_OFFLINE,
   ERROR_BAD_DATA: ERROR_BAD_DATA
